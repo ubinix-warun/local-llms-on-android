@@ -24,10 +24,17 @@ class OnnxModel(private val context: Context, private val config: ModelConfig) {
     }
 
     // Initialize ONNX session from asset model path
+
+    // Initialize ONNX session from asset model path
     private fun initializeModel(): OrtSession {
         val modelFile = loadModelFile(config.modelPath)
         Log.d(TAG, "Loading model from: ${modelFile.absolutePath}")
-        val opts = OrtSession.SessionOptions()
+
+        val opts = OrtSession.SessionOptions().apply {
+            // Workaround for InsertedPrecisionFreeCast + SimplifiedLayerNormFusion init crash
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+        }
+
         val session = env.createSession(modelFile.absolutePath, opts)
         Log.d(TAG, "Model loaded and session initialized")
         return session
