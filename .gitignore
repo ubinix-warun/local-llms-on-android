@@ -1,0 +1,43 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python local state
+.venv/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+
+# IntelliJ / Android Studio
+**/.idea/
+**/*.iml
+
+# Gradle / Kotlin local state
+**/.gradle/
+.gradle-cache/
+**/.gradle-user-home/
+**/.gradle-user-home-local/
+**/.gradle-home/
+**/.kotlin/
+**/.android-home/
+**/local.properties
+**/gradle/gradle-daemon-jvm.properties
+
+# Build outputs
+**/build/
+**/captures/
+**/.externalNativeBuild/
+**/.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Local model assets
+**/app/src/main/assets/model.onnx
+**/app/src/main/assets/*.litertlm
+**/.gradle-user-home-verify/
+**/.g/
+g/
+g-check*/
