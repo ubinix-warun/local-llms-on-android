@@ -14,9 +14,18 @@ import kotlinx.coroutines.withContext
 
 class QwenLiteRtBackend(
     private val context: Context,
-    private val spec: QwenLiteRtSpec,
-    private val modelFileResolver: ModelFileResolver
+    private val spec: ModelDescriptor,
+    private val modelFileResolver: ModelFileResolver,
+    private val runtimeSettings: ModelRuntimeSettings = ModelRuntimeSettings(
+        ModelRuntimeSettingsLimits.LITERT_DEFAULT_CONTEXT_LENGTH
+    ),
+    private val initializationPolicy: BackendInitializationPolicy = BackendInitializationPolicy()
 ) : ChatBackend {
+
+    override val capabilities = BackendCapabilities(
+        supportsNativeToolCalling = spec is QwenLiteRtSpec,
+        contextWindowTokens = runtimeSettings.contextLengthTokens
+    )
 
     companion object {
         private const val THOUGHT_CHANNEL_NAME = "thought"
@@ -28,30 +37,40 @@ class QwenLiteRtBackend(
     override suspend fun initialize() = withContext(Dispatchers.IO) {
         val modelFile = modelFileResolver.resolveModelFile(spec)
 
-        val gpuResult = runCatching {
-            Engine(
-                EngineConfig(
-                    modelPath = modelFile.absolutePath,
-                    backend = Backend.GPU(),
-                    cacheDir = context.cacheDir.absolutePath
-                )
-            ).apply { initialize() }
-        }
+        val gpuResult = createInitializedEngine(modelFile.absolutePath, Backend.GPU())
 
         engine = gpuResult.getOrElse { gpuError ->
-            runCatching {
-                Engine(
-                    EngineConfig(
-                        modelPath = modelFile.absolutePath,
-                        backend = Backend.CPU(),
-                        cacheDir = context.cacheDir.absolutePath
-                    )
-                ).apply { initialize() }
-            }.getOrElse { cpuError ->
+            if (!initializationPolicy.allowCpuFallback) {
+                throw IllegalStateException(
+                    "Failed to initialize LiteRT-LM on GPU. CPU fallback was skipped because this load is already a memory risk: ${gpuError.message}",
+                    gpuError
+                )
+            }
+            createInitializedEngine(modelFile.absolutePath, Backend.CPU()).getOrElse { cpuError ->
                 throw IllegalStateException(
                     "Failed to initialize LiteRT-LM GPU (${gpuError.message}) and CPU (${cpuError.message}).",
                     cpuError
                 )
+            }
+        }
+    }
+
+    private fun createInitializedEngine(modelPath: String, backend: Backend): Result<Engine> {
+        var candidate: Engine? = null
+        return runCatching {
+            candidate = Engine(
+                EngineConfig(
+                    modelPath = modelPath,
+                    backend = backend,
+                    maxNumTokens = runtimeSettings.contextLengthTokens,
+                    cacheDir = context.cacheDir.absolutePath
+                )
+            )
+            candidate!!.initialize()
+            candidate!!
+        }.onFailure {
+            candidate?.let { failed ->
+                runCatching { failed.close() }
             }
         }
     }
@@ -61,26 +80,42 @@ class QwenLiteRtBackend(
         thinkingEnabled: Boolean,
         modelInstruction: String
     ) {
-        recreateConversation(history, thinkingEnabled, modelInstruction)
+        val boundedHistory = fitHistoryWithinContext(
+            InferenceRequest(
+                history = history,
+                thinkingEnabled = thinkingEnabled,
+                modelInstruction = modelInstruction
+            )
+        )
+        recreateConversation(boundedHistory, thinkingEnabled, modelInstruction)
     }
 
     override suspend fun streamReply(
-        history: List<ChatTurn>,
-        thinkingEnabled: Boolean,
-        modelInstruction: String,
-        imageFilePaths: List<String>,
+        request: InferenceRequest,
         onPartial: (BackendResponse) -> Unit
     ): BackendResponse = withContext(Dispatchers.IO) {
-        require(imageFilePaths.isEmpty()) {
-            "Qwen LiteRT models do not support direct image input."
+        require(request.imageFilePaths.isEmpty()) {
+            "This text model does not support direct image input. Use OCR."
         }
-        require(history.isNotEmpty() && history.last().role == ChatRole.USER) {
-            "Qwen LiteRT backend expects the final history turn to be the user's prompt."
+        require(request.nativeAudioInputs.isEmpty()) {
+            "This text model does not support native audio input."
+        }
+        val boundedHistory = fitHistoryWithinContext(request)
+        require(
+            boundedHistory.isNotEmpty() &&
+                (boundedHistory.last().role == ChatRole.USER || boundedHistory.last().isToolResult)
+        ) {
+            "Qwen LiteRT backend expects the final history turn to be a user or tool message."
         }
 
-        val initialHistory = history.dropLast(1)
-        val userTurn = history.last()
-        recreateConversation(initialHistory, thinkingEnabled, modelInstruction)
+        val initialHistory = boundedHistory.dropLast(1)
+        val userTurn = boundedHistory.last()
+        recreateConversation(
+            initialHistory,
+            request.thinkingEnabled,
+            request.modelInstruction,
+            request.tools
+        )
 
         val activeConversation = conversation
             ?: throw IllegalStateException("Conversation was not created.")
@@ -88,8 +123,9 @@ class QwenLiteRtBackend(
         val rawOutputBuilder = StringBuilder()
         val channelThinkingBuilder = StringBuilder()
 
-        activeConversation.sendMessageAsync(userTurn.text).collect { message ->
-            val chunkText = message.contents.toString()
+        var externalToolCalls = emptyList<ExternalToolCall>()
+        activeConversation.sendMessageAsync(userTurn.toLiteRtMessage()).collect { message ->
+            val chunkText = message.visibleText()
             if (chunkText.isNotEmpty()) {
                 rawOutputBuilder.append(chunkText)
             }
@@ -99,18 +135,31 @@ class QwenLiteRtBackend(
                 channelThinkingBuilder.append(thoughtChunk)
             }
 
-            onPartial(
-                QwenResponseParser.parseVisibleResponse(
+            val parsed = if (spec is CustomLiteRtSpec) {
+                BackendResponse(rawOutputBuilder.toString(), toolCalls = externalToolCalls)
+            } else QwenResponseParser.parseVisibleResponse(
                     rawOutput = rawOutputBuilder.toString(),
                     channelThinking = channelThinkingBuilder.toString().takeIf { it.isNotBlank() }
                 )
+            if (message.toolCalls.isNotEmpty()) {
+                externalToolCalls = nativeToolCallsToExternal(
+                    message.toolCalls,
+                    externalToolCalls,
+                    request.parallelToolCalls
+                )
+            }
+            onPartial(
+                parsed.copy(toolCalls = externalToolCalls)
             )
         }
 
-        QwenResponseParser.parseVisibleResponse(
+        val finalResponse = if (spec is CustomLiteRtSpec) {
+            BackendResponse(rawOutputBuilder.toString())
+        } else QwenResponseParser.parseVisibleResponse(
             rawOutput = rawOutputBuilder.toString(),
             channelThinking = channelThinkingBuilder.toString().takeIf { it.isNotBlank() }
         )
+        finalResponse.copy(toolCalls = externalToolCalls)
     }
 
     override fun cancelGeneration() {
@@ -127,25 +176,25 @@ class QwenLiteRtBackend(
     private fun recreateConversation(
         history: List<ChatTurn>,
         thinkingEnabled: Boolean,
-        modelInstruction: String
+        modelInstruction: String,
+        tools: List<ExternalToolDefinition> = emptyList()
     ) {
         closeConversation()
         conversation = engine.createConversation(
             ConversationConfig(
                 systemInstruction = Contents.of(buildSystemInstruction(thinkingEnabled, modelInstruction)),
                 initialMessages = history.map { turn ->
-                    when (turn.role) {
-                        ChatRole.USER -> Message.user(turn.text)
-                        ChatRole.ASSISTANT -> Message.model(turn.text)
-                    }
+                    turn.toLiteRtMessage()
                 },
-                channels = if (spec.thinkingModeAvailable && !thinkingEnabled) emptyList() else null
+                tools = externalToolProviders(tools),
+                automaticToolCalling = false,
+                channels = if (spec is CustomLiteRtSpec || (spec is QwenLiteRtSpec && !thinkingEnabled)) emptyList() else null
             )
         )
     }
 
     private fun buildSystemInstruction(thinkingEnabled: Boolean, modelInstruction: String): String {
-        if (!spec.thinkingModeAvailable) {
+        if (spec !is QwenLiteRtSpec || !spec.thinkingModeAvailable) {
             return modelInstruction.trim()
         }
 

@@ -55,6 +55,7 @@ data class GemmaLiteRtSpec(
     val displayNameOverride: String = modelName,
     val thinkingModeAvailable: Boolean = false,
     val directImageInputAvailable: Boolean = true,
+    val directAudioInputAvailable: Boolean = true,
     val downloadSizeLabel: String,
     val recommendationLabel: String,
     val estimatedDownloadBytes: Long,
@@ -89,6 +90,23 @@ data class QwenLiteRtSpec(
     deviceRecommendation = recommendationLabel,
     approxDownloadBytes = estimatedDownloadBytes,
     downloadFiles = downloadArtifacts
+)
+
+data class CustomLiteRtSpec(
+    val modelAssetName: String,
+    val fileBytes: Long,
+    val modelId: String,
+    val modelDisplayName: String,
+    val detectedInputs: CustomModelCapabilities? = null
+) : ModelDescriptor(
+    id = modelId,
+    displayName = modelDisplayName,
+    supportsThinking = false,
+    backendLabel = "LiteRT (local beta)",
+    sizeLabel = "%.2f GB".format(java.util.Locale.US, fileBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)),
+    deviceRecommendation = "${detectedInputs?.let { "Detected inputs: ${it.inputSummary()}." } ?: "Input capabilities unknown; text chat will be attempted."} Native image/audio availability depends on this device. Beta compatibility is not guaranteed.",
+    approxDownloadBytes = fileBytes,
+    downloadFiles = listOf(ModelDownloadFile(modelAssetName, "", fileBytes))
 )
 
 object ModelRegistry {
@@ -238,7 +256,15 @@ object ModelRegistry {
         )
     )
 
-    val all = listOf(gemma4E4B, gemma4E2B, deepSeekR1DistillQwen15BLiteRt, qwen3LiteRt, qwen3, qwen25)
+    private val builtInModels = listOf(gemma4E4B, gemma4E2B, deepSeekR1DistillQwen15BLiteRt, qwen3LiteRt, qwen3, qwen25)
+    @Volatile private var customModels: List<CustomLiteRtSpec> = emptyList()
+
+    val all: List<ModelDescriptor>
+        get() = builtInModels + customModels
+
+    fun loadCustomModels(context: android.content.Context) {
+        customModels = CustomLiteRtModelStore(context).loadAll()
+    }
 
     fun findById(id: String?): ModelDescriptor? {
         if (id.isNullOrBlank()) {
@@ -251,7 +277,7 @@ object ModelRegistry {
 
 object DownloadableModelRegistry {
     fun findById(id: String?): ModelDescriptor? {
-        return ModelRegistry.findById(id)
+        return ModelRegistry.findById(id)?.takeUnless { it is CustomLiteRtSpec }
     }
 }
 
@@ -260,6 +286,7 @@ val ModelDescriptor.primaryModelFileName: String
         is OnnxQwenSpec -> modelAssetName
         is GemmaLiteRtSpec -> modelAssetName
         is QwenLiteRtSpec -> modelAssetName
+        is CustomLiteRtSpec -> modelAssetName
     }
 
 val ModelDescriptor.defaultInstruction: String
@@ -267,4 +294,5 @@ val ModelDescriptor.defaultInstruction: String
         is OnnxQwenSpec -> defaultSystemPrompt
         is GemmaLiteRtSpec -> defaultSystemInstruction
         is QwenLiteRtSpec -> defaultSystemInstruction
+        is CustomLiteRtSpec -> InstructionPreset.default.instruction
     }

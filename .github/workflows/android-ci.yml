@@ -1,0 +1,82 @@
+name: Android CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unit tests and debug APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: pocket_llm_src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # gradle.properties asks for a 16 GB daemon heap, which is the runner's entire RAM.
+      - name: Cap Gradle heap for CI runner
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" >> ~/.gradle/gradle.properties
+
+      - name: Run unit tests
+        run: bash ./gradlew testGithubDebugUnitTest --stacktrace
+
+      - name: Build debug APKs (GitHub, F-Droid, Play)
+        run: bash ./gradlew assembleGithubDebug assembleFdroidDebug assemblePlayDebug --stacktrace
+
+      - name: Check F-Droid APK has no ML Kit, Play Services or Firebase classes
+        run: python3 ../.github/scripts/check_no_proprietary_classes.py app/build/outputs/apk/fdroid/debug/*.apk
+
+      - name: Check 16 KB page support of native libraries
+        continue-on-error: true
+        run: python3 ../.github/scripts/check_16kb_pages.py app/build/outputs/apk/play/debug/*.apk
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: pocket_llm_src/app/build/reports/tests/
+
+      - name: Upload GitHub debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-llm-github-debug-apk
+          path: pocket_llm_src/app/build/outputs/apk/github/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload F-Droid debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-llm-fdroid-debug-apk
+          path: pocket_llm_src/app/build/outputs/apk/fdroid/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload Play debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-llm-play-debug-apk
+          path: pocket_llm_src/app/build/outputs/apk/play/debug/*.apk
+          if-no-files-found: error

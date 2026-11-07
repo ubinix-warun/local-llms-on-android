@@ -45,11 +45,23 @@ class ChatController(
     init {
         val appContext = context.applicationContext
         modelInstructionStore = ModelInstructionStore(appContext)
+        val modelRuntimeSettings = ModelRuntimeSettingsStore(appContext).load(modelDescriptor)
         val modelFileResolver = ModelFileResolver(appContext)
         backend = when (modelDescriptor) {
-            is OnnxQwenSpec -> OnnxChatBackend(appContext, modelDescriptor, modelFileResolver)
-            is GemmaLiteRtSpec -> GemmaLiteRtBackend(appContext, modelDescriptor, modelFileResolver)
-            is QwenLiteRtSpec -> QwenLiteRtBackend(appContext, modelDescriptor, modelFileResolver)
+            is OnnxQwenSpec -> OnnxChatBackend(appContext, modelDescriptor, modelFileResolver, modelRuntimeSettings)
+            is GemmaLiteRtSpec -> GemmaLiteRtBackend(
+                appContext,
+                modelDescriptor,
+                modelFileResolver,
+                modelRuntimeSettings
+            )
+            is QwenLiteRtSpec -> QwenLiteRtBackend(
+                appContext,
+                modelDescriptor,
+                modelFileResolver,
+                modelRuntimeSettings
+            )
+            is CustomLiteRtSpec -> GemmaLiteRtBackend(appContext, modelDescriptor, modelFileResolver, modelRuntimeSettings)
         }
     }
 
@@ -94,10 +106,11 @@ class ChatController(
             try {
                 val response = withContext(Dispatchers.IO) {
                     backend.streamReply(
-                        history = committedTurns.asModelMemoryTurns(),
-                        thinkingEnabled = thinkingEnabled,
-                        modelInstruction = currentModelInstruction(),
-                        imageFilePaths = emptyList(),
+                        request = InferenceRequest(
+                            history = committedTurns.asModelMemoryTurns(),
+                            thinkingEnabled = thinkingEnabled,
+                            modelInstruction = currentModelInstruction()
+                        ),
                         onPartial = { partial ->
                             scope.launch {
                                 updateThinkingTimer(partial)
@@ -245,12 +258,14 @@ class ChatController(
         _state.value = ChatUiState(
             title = _state.value.title,
             transcript = buildTranscript(),
-            statusMessage = statusMessage,
+            statusMessage = if (isReady && modelDescriptor is CustomLiteRtSpec && statusMessage == MODEL_READY_STATUS_MESSAGE)
+                backend.capabilities.customReadyStatus() else statusMessage,
             isLoading = isLoading,
             isReady = isReady,
             isGenerating = isGenerating,
             supportsThinking = modelDescriptor.supportsThinking,
-            supportsDirectImageInput = backend.supportsDirectImageInput
+            supportsDirectImageInput = backend.supportsDirectImageInput,
+            supportsNativeAudioInput = backend.supportsNativeAudioInput
         )
     }
 

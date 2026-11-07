@@ -24,6 +24,7 @@ Thumbs.db
 **/gradle/gradle-daemon-jvm.properties
 
 # Build outputs
+/pocket_llm_src/app/release/output-metadata.json
 **/build/
 **/captures/
 **/.externalNativeBuild/
@@ -41,3 +42,18 @@ Thumbs.db
 **/.g/
 g/
 g-check*/
+%SystemDrive%/
+.codex-remote-attachments/
+graphify-out/.graphify_labels.json
+graphify-out/.graphify_learning.json
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/cost.json
+graphify-out/GRAPH_REPORT.md
+graphify-out/graph.html
+graphify-out/graph.json
+graphify-out/manifest.json
+graphify-out/cache/last_query_stamp
+graphify-out/cache/stat-index.json
+graphify-out/memory/query_20260811_163242_something_wrong_with_audio_record__i_cant_see_any.md
+graphify-out/reflections/LESSONS.md

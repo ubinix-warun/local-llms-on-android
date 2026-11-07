@@ -9,8 +9,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 class OnnxChatBackend(
     private val context: Context,
     private val spec: OnnxQwenSpec,
-    private val modelFileResolver: ModelFileResolver
+    private val modelFileResolver: ModelFileResolver,
+    private val runtimeSettings: ModelRuntimeSettings = ModelRuntimeSettings(
+        ModelRuntimeSettingsLimits.ONNX_CONTEXT_LENGTH
+    )
 ) : ChatBackend {
+
+    override val capabilities = BackendCapabilities(
+        contextWindowTokens = runtimeSettings.contextLengthTokens
+    )
+
+    override fun estimateTokens(text: String): Int {
+        return if (::tokenizer.isInitialized) tokenizer.tokenize(text).size else conservativeTokenEstimate(text)
+    }
+
+    override fun estimateSerializedPromptTokens(request: InferenceRequest): Int {
+        check(::promptBuilder.isInitialized) { "The ONNX tokenizer is not initialized." }
+        val systemPrompt = buildSystemPrompt(request.thinkingEnabled, request.modelInstruction)
+        return promptBuilder.countPromptTokens(request.history, PromptIntent.QA(systemPrompt))
+    }
 
     private lateinit var tokenizer: BpeTokenizer
     private lateinit var config: ModelConfig
@@ -36,21 +53,35 @@ class OnnxChatBackend(
     }
 
     override suspend fun streamReply(
-        history: List<ChatTurn>,
-        thinkingEnabled: Boolean,
-        modelInstruction: String,
-        imageFilePaths: List<String>,
+        request: InferenceRequest,
         onPartial: (BackendResponse) -> Unit
     ): BackendResponse = withContext(Dispatchers.IO) {
-        require(imageFilePaths.isEmpty()) {
+        require(request.imageFilePaths.isEmpty()) {
             "ONNX chat models do not support direct image input."
+        }
+        require(request.nativeAudioInputs.isEmpty()) {
+            "ONNX chat models do not support native audio input."
         }
         cancelRequested.set(false)
         val coroutineIsActive = { isActive }
         val isQwen3 = spec.modelName.equals("qwen3", ignoreCase = true)
 
-        val systemPrompt = buildSystemPrompt(thinkingEnabled, modelInstruction)
-        val promptTokens = promptBuilder.buildPromptTokens(history, PromptIntent.QA(systemPrompt))
+        val systemPrompt = buildSystemPrompt(request.thinkingEnabled, request.modelInstruction)
+        val promptLimit = promptTokenLimit(request)
+        val promptTokens = if (request.outputTokenReserve > 0) {
+            requirePromptFits(request)
+            promptBuilder.buildPromptTokensStrict(
+                request.history,
+                PromptIntent.QA(systemPrompt),
+                promptLimit
+            )
+        } else {
+            promptBuilder.buildPromptTokens(
+                request.history,
+                PromptIntent.QA(systemPrompt),
+                maxTokens = promptLimit
+            )
+        }
         val responseBuilder = StringBuilder()
         val streamDecoder = tokenizer.createStreamDecoder()
         var tokenCounter = 0
